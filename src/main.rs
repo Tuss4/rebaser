@@ -19,27 +19,28 @@ fn main() {
         std::process::exit(1);
     }
 
-    if let Err(e) = run(&args.source, &args.target) {
+    let ops = git::RealGit::new();
+    if let Err(e) = run(&ops, &args.source, &args.target) {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
 }
 
-fn run(source: &str, target: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn run(ops: &impl git::GitOps, source: &str, target: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("==> Checking out source branch '{source}'");
-    git::checkout(source)?;
+    ops.checkout(source)?;
 
     println!("==> Fetching origin");
-    git::fetch_origin()?;
+    ops.fetch_origin()?;
 
     println!("==> Resetting '{source}' to origin/{source}");
-    git::reset_hard_origin(source)?;
+    ops.reset_hard_origin(source)?;
 
     println!("==> Checking out target branch '{target}'");
-    git::checkout(target)?;
+    ops.checkout(target)?;
 
     println!("==> Rebasing '{target}' onto '{source}'");
-    if let Err(e) = git::rebase(source) {
+    if let Err(e) = ops.rebase(source) {
         eprintln!("\nConflicts detected during rebase.");
         eprintln!("Resolve the conflicts, stage the files, then run:");
         eprintln!("  git rebase --continue");
@@ -49,4 +50,90 @@ fn run(source: &str, target: &str) -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\nDone. '{target}' has been rebased onto '{source}'.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+
+    struct MockGit {
+        results: RefCell<VecDeque<Result<(), git::GitError>>>,
+    }
+
+    impl MockGit {
+        fn new(results: Vec<Result<(), git::GitError>>) -> Self {
+            Self {
+                results: RefCell::new(results.into()),
+            }
+        }
+
+        fn next(&self) -> Result<(), git::GitError> {
+            self.results
+                .borrow_mut()
+                .pop_front()
+                .expect("unexpected git call in mock")
+        }
+    }
+
+    impl git::GitOps for MockGit {
+        fn checkout(&self, _: &str) -> Result<(), git::GitError> {
+            self.next()
+        }
+        fn fetch_origin(&self) -> Result<(), git::GitError> {
+            self.next()
+        }
+        fn reset_hard_origin(&self, _: &str) -> Result<(), git::GitError> {
+            self.next()
+        }
+        fn rebase(&self, _: &str) -> Result<(), git::GitError> {
+            self.next()
+        }
+    }
+
+    fn ok() -> Result<(), git::GitError> {
+        Ok(())
+    }
+
+    fn err() -> Result<(), git::GitError> {
+        Err(git::failing_error())
+    }
+
+    #[test]
+    fn run_happy_path() {
+        let mock = MockGit::new(vec![ok(), ok(), ok(), ok(), ok()]);
+        assert!(run(&mock, "main", "feature").is_ok());
+    }
+
+    #[test]
+    fn run_fails_on_checkout_source() {
+        let mock = MockGit::new(vec![err()]);
+        assert!(run(&mock, "main", "feature").is_err());
+    }
+
+    #[test]
+    fn run_fails_on_fetch() {
+        let mock = MockGit::new(vec![ok(), err()]);
+        assert!(run(&mock, "main", "feature").is_err());
+    }
+
+    #[test]
+    fn run_fails_on_reset() {
+        let mock = MockGit::new(vec![ok(), ok(), err()]);
+        assert!(run(&mock, "main", "feature").is_err());
+    }
+
+    #[test]
+    fn run_fails_on_checkout_target() {
+        let mock = MockGit::new(vec![ok(), ok(), ok(), err()]);
+        assert!(run(&mock, "main", "feature").is_err());
+    }
+
+    #[test]
+    fn run_fails_on_rebase_conflict() {
+        let mock = MockGit::new(vec![ok(), ok(), ok(), ok(), err()]);
+        let result = run(&mock, "main", "feature");
+        assert!(result.is_err());
+    }
 }
